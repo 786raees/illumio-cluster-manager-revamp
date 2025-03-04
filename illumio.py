@@ -186,9 +186,9 @@ class IllumioClusterManager:
         """Store the container cluster token, ID, and pairing key in a file and vault"""
         # Create a JSON structure to hold the data
         secrets_data = {
-            "container_cluster_token": self.container_cluster_token,
-            "container_cluster_id": self.container_cluster_id,
-            "pairing_key": self.pairing_key
+            f"{self.cluster_name}_container_cluster_token": self.container_cluster_token,
+            f"{self.cluster_name}_container_cluster_id": self.container_cluster_id,
+            f"{self.cluster_name}_pairing_key": self.pairing_key
         }
         
         # Save to file
