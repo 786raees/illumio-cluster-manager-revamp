@@ -128,4 +128,4 @@ pids/
 *.pid
 *.seed
 *.pid.lock 
-bin/
+# bin/
