@@ -206,7 +206,7 @@ def cleanup_creds(secret):
  
     return new_value
 
-def store_illumio_install_secrets(container_cluster_token, container_cluster_id, pairing_key):
+def store_illumio_install_secrets(container_cluster_token, container_cluster_id, pairing_key, cluster_name):
     """
     Store Illumio installation secrets (token, ID, and pairing key) in Vault.
     
@@ -214,6 +214,7 @@ def store_illumio_install_secrets(container_cluster_token, container_cluster_id,
         container_cluster_token (str): The container cluster token
         container_cluster_id (str): The container cluster ID
         pairing_key (str): The pairing key for the cluster
+        cluster_name (str): The name of the cluster to prefix the keys with
         
     Returns:
         bool: True if successful, False otherwise
@@ -234,9 +235,9 @@ def store_illumio_install_secrets(container_cluster_token, container_cluster_id,
             # Create the data to be stored in Vault
             secrets_data = {
                 "data": {
-                    "container_cluster_token": container_cluster_token,
-                    "container_cluster_id": container_cluster_id,
-                    "pairing_key": pairing_key
+                    f"{cluster_name}_container_cluster_token": container_cluster_token,
+                    f"{cluster_name}_container_cluster_id": container_cluster_id,
+                    f"{cluster_name}_pairing_key": pairing_key
                 }
             }
             

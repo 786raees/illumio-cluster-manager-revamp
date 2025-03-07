@@ -207,7 +207,8 @@ class IllumioClusterManager:
             success = ejvault.store_illumio_install_secrets(
                 self.container_cluster_token, 
                 self.container_cluster_id, 
-                self.pairing_key
+                self.pairing_key,
+                self.cluster_name
             )
             if not success:
                 raise Exception("Failed to store secrets in vault")
