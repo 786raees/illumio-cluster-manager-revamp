@@ -23,3 +23,5 @@ kubernetes_tag = 'kubernetes'
 allowed_tag = 'allowed'
 user_agent = 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; +http://www.google.com/bot.html) Safari/537.36.'
 groups = ["twistlock_admin"]
+# Set default group to first group in the list
+group = groups[0]
