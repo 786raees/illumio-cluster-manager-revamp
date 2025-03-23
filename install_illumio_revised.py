@@ -73,13 +73,49 @@ class IllumioClusterManager:
         return response.json()
 
     def check_cluster_exists(self):
+        """
+        Check if cluster exists in PCE, or if pairing profile or vault secrets exist.
+        Sets appropriate IDs if found and returns True if any exist.
+        """
+        # Check if cluster exists in container_clusters
+        cluster_exists = False
         cluster_url = f"{self.base_url}/container_clusters"
         clusters = self.get_requests(cluster_url)
         for cluster in clusters:
-            if cluster["name"] == self.cluster_name:
+            if cluster.get("name") == self.cluster_name:
                 self.container_cluster_id = cluster["href"].split('/', 4)[-1]
-                return True
-        return False
+                cluster_exists = True
+                print(f"Found existing cluster {self.cluster_name} in PCE container clusters")
+                break
+        
+        # Check if pairing profile exists
+        pairing_exists = False
+        pairing_url = f"{self.base_url}/pairing_profiles"
+        pairing_profiles = self.get_requests(pairing_url)
+        for profile in pairing_profiles:
+            if profile.get("name") == self.cluster_name:
+                self.pairing_profile_id = profile["href"].split('/', 4)[-1]
+                pairing_exists = True
+                print(f"Found existing pairing profile for {self.cluster_name}")
+                break
+        
+        # Check if vault secrets exist
+        secrets_exist = False
+        try:
+            # Use the retrieve_cluster_secrets function outside the class
+            # Note: We're importing it from the module level
+            container_cluster_id, container_cluster_token, pairing_key = retrieve_cluster_secrets(self.cluster_name)
+            if all([container_cluster_id, container_cluster_token, pairing_key]):
+                self.container_cluster_id = container_cluster_id
+                self.container_cluster_token = container_cluster_token
+                self.pairing_key = pairing_key
+                secrets_exist = True
+                print(f"Found existing secrets in vault for {self.cluster_name}")
+        except Exception as e:
+            print(f"Error checking for vault secrets: {str(e)}")
+        
+        # Return True if any of these exist
+        return cluster_exists or pairing_exists or secrets_exist
 
     def create_cluster_label(self):
         label_url = f"{self.base_url}/labels"
@@ -689,7 +725,7 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
         print("Helm install command executed successfully")
         if debug:
             print(process.stdout)
-           
+       
         # Verify installation
         print("Verifying installation...")
         get_release = subprocess.run(
