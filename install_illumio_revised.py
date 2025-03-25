@@ -55,11 +55,17 @@ class IllumioClusterManager:
         return response.json()
 
     def post_requests(self, url, data):
-        headers = {'Content-Type': 'application/json'}
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
         proxies = {'http': None, 'https': None}
         auth = (self.user, self.key)
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         response = requests.post(url, timeout=15, verify=False, headers=headers, proxies=proxies, auth=auth, data=data)
+        if response.status_code == 406:
+            print(f"Error creating resource. Response: {response.text}")
+            raise Exception(f"Failed to create resource: {response.text}")
         response.raise_for_status()
         return response.json()
 
@@ -309,6 +315,14 @@ class IllumioClusterManager:
             cluster_label = self.get_cluster_labels()
             labels = [json.loads(cluster_label)] if cluster_label else []
         
+        # Ensure labels are properly formatted
+        formatted_labels = []
+        for label in labels:
+            if isinstance(label, str):
+                formatted_labels.append({"href": label})
+            elif isinstance(label, dict):
+                formatted_labels.append(label)
+        
         pairing_profile_data = {
             "name": self.cluster_name,
             "enforcement_mode": "visibility_only",
@@ -325,13 +339,17 @@ class IllumioClusterManager:
             "enforcement_mode_lock": True,
             "log_traffic_lock": True,
             "visibility_level_lock": True,
-            "labels": labels
+            "labels": formatted_labels
         }
         
-        pairing_profile_details = self.post_requests(pairing_profile_url, json.dumps(pairing_profile_data))
-        self.pairing_profile_id = pairing_profile_details["href"].split('/', 4)[-1]
-        print(f"Pairing Profile {self.cluster_name.upper()} created.")
-        return pairing_profile_details
+        try:
+            pairing_profile_details = self.post_requests(pairing_profile_url, json.dumps(pairing_profile_data))
+            self.pairing_profile_id = pairing_profile_details["href"].split('/', 4)[-1]
+            print(f"Pairing Profile {self.cluster_name.upper()} created.")
+            return pairing_profile_details
+        except Exception as e:
+            print(f"Error creating pairing profile: {str(e)}")
+            raise
 
     def create_pairing_key(self):
         """Create a pairing key for the pairing profile"""
