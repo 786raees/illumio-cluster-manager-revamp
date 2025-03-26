@@ -26,6 +26,7 @@ import ruamel.yaml
 from bin.illumio import ejvault
 from bin.illumio import ejconfig
 from bin.illumio import ejfile
+import time
 
 class IllumioClusterManager:
     def __init__(self, cluster_name):
@@ -681,10 +682,80 @@ def update_registry_names(file_path, new_registry):
     except Exception as e:
         print(f"Error updating values.yaml: {e}")
  
+def cleanup_failed_installation(release_name, namespace):
+    """
+    Clean up a failed Helm installation.
+    
+    Args:
+        release_name (str): Name of the Helm release to clean up
+        namespace (str): Kubernetes namespace of the release
+        
+    Returns:
+        bool: True if cleanup was successful, False otherwise
+    """
+    try:
+        print(f"Cleaning up failed installation of release '{release_name}' in namespace '{namespace}'...")
+        
+        # Check if release exists and is in failed state
+        status_check = subprocess.run(
+            ["helm", "status", release_name, "-n", namespace],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            universal_newlines=True
+        )
+        
+        # If status command succeeds, we need to uninstall
+        if status_check.returncode == 0:
+            print(f"Found release '{release_name}' in failed state, uninstalling...")
+            uninstall_cmd = [
+                "helm", "uninstall", release_name,
+                "-n", namespace,
+                "--wait"  # Wait for resources to be deleted
+            ]
+            
+            uninstall_process = subprocess.run(
+                uninstall_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            print(f"Successfully cleaned up failed release '{release_name}'")
+        else:
+            # Release might be in a state where helm status doesn't work
+            # Try uninstall with --no-hooks to force removal
+            try:
+                uninstall_cmd = [
+                    "helm", "uninstall", release_name,
+                    "-n", namespace,
+                    "--no-hooks"  # Skip running hooks to avoid errors
+                ]
+                
+                uninstall_process = subprocess.run(
+                    uninstall_cmd,
+                    check=False,  # Don't fail if uninstall fails
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True
+                )
+                print(f"Attempted force cleanup of release '{release_name}'")
+            except Exception as e:
+                print(f"Warning: Force cleanup attempt failed: {str(e)}")
+        
+        # Give Kubernetes some time to clean up resources
+        print("Waiting for Kubernetes to clean up resources...")
+        time.sleep(10)
+        return True
+        
+    except Exception as e:
+        print(f"Error during cleanup: {str(e)}")
+        return False
+
 def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-system',
                               values_file='values.yaml', release_name='illumio',
                               registry='registry.access.redhat.com/ubi9',
-                              create_namespace=False, debug=False):
+                              create_namespace=False, debug=False, max_retries=3):
     """
     Install Illumio Helm chart with values from Vault.
    
@@ -697,6 +768,7 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
         registry (str): Container registry to use
         create_namespace (bool): Create namespace if it doesn't exist
         debug (bool): Enable debug output
+        max_retries (int): Maximum number of installation attempts
        
     Returns:
         bool: True if installation successful, False otherwise
@@ -741,68 +813,95 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
         print("Failed to retrieve required secrets from Vault")
         return False
        
-    try:
-        # Build the Helm install command
-        cmd = [
-            "helm", "install", release_name,
-            chart_path,
-            "-n", namespace,
-            "-f", values_file,
-            "--set", f"cluster_id={container_cluster_id}",
-            "--set", f"cluster_token={container_cluster_token}",
-            "--set", f"cluster_code={pairing_key}",
-            "--set", f"registry={registry}"
-        ]
-       
-        # Add create-namespace flag if requested
-        if create_namespace:
-            cmd.append("--create-namespace")
+    # Attempt installation with retries
+    attempt = 1
+    while attempt <= max_retries:
+        try:
+            print(f"\n=== Installation Attempt {attempt}/{max_retries} ===")
+            
+            # Build the Helm install command
+            cmd = [
+                "helm", "install", release_name,
+                chart_path,
+                "-n", namespace,
+                "-f", values_file,
+                "--set", f"cluster_id={container_cluster_id}",
+                "--set", f"cluster_token={container_cluster_token}",
+                "--set", f"cluster_code={pairing_key}",
+                "--set", f"registry={registry}"
+            ]
            
-        # Add debug flag if requested
-        if debug:
-            cmd.append("--debug")
-            print(f"Executing command: {' '.join(cmd)}")
-       
-        # Execute Helm install command
-        print(f"Installing Illumio Helm chart in namespace {namespace}...")
-        process = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True  # Use this instead of text=True for Python 3.6
-        )
-       
-        print("Helm install command executed successfully")
-        if debug:
-            print(process.stdout)
-       
-        # Verify installation
-        print("Verifying installation...")
-        get_release = subprocess.run(
-            ["helm", "status", release_name, "-n", namespace],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True  # Use this instead of text=True for Python 3.6
-        )
-       
-        if "STATUS: deployed" in get_release.stdout:
-            print("Illumio Helm chart deployed successfully!")
-            return True
-        else:
-            print("Helm install command completed but release status is not 'deployed'")
+            # Add create-namespace flag if requested
+            if create_namespace:
+                cmd.append("--create-namespace")
+               
+            # Add debug flag if requested
             if debug:
-                print(get_release.stdout)
-            return False
+                cmd.append("--debug")
+                print(f"Executing command: {' '.join(cmd)}")
            
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing Helm command: {str(e)}")
-        print(f"Error details: {e.stderr}")
-        return False
-    except Exception as e:
-        print(f"Unexpected error during Illumio installation: {str(e)}")
-        return False
+            # Execute Helm install command
+            print(f"Installing Illumio Helm chart in namespace {namespace}...")
+            process = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+           
+            print("Helm install command executed successfully")
+            if debug:
+                print(process.stdout)
+           
+            # Verify installation
+            print("Verifying installation...")
+            get_release = subprocess.run(
+                ["helm", "status", release_name, "-n", namespace],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+           
+            if "STATUS: deployed" in get_release.stdout:
+                print("Illumio Helm chart deployed successfully!")
+                return True
+            else:
+                print("Helm install command completed but release status is not 'deployed'")
+                if debug:
+                    print(get_release.stdout)
+                
+                # Clean up the failed installation before retrying
+                if attempt < max_retries:
+                    print(f"Deployment not successful. Cleaning up before retry...")
+                    cleanup_failed_installation(release_name, namespace)
+                
+                attempt += 1
+               
+        except subprocess.CalledProcessError as e:
+            print(f"Error executing Helm command: {str(e)}")
+            print(f"Error details: {e.stderr}")
+            
+            # Clean up the failed installation before retrying
+            if attempt < max_retries:
+                print(f"Installation failed. Cleaning up before retry...")
+                cleanup_failed_installation(release_name, namespace)
+                
+            attempt += 1
+            
+        except Exception as e:
+            print(f"Unexpected error during Illumio installation: {str(e)}")
+            
+            # Clean up the failed installation before retrying
+            if attempt < max_retries:
+                print(f"Installation failed due to unexpected error. Cleaning up before retry...")
+                cleanup_failed_installation(release_name, namespace)
+                
+            attempt += 1
+    
+    print(f"Failed to install Illumio Helm chart after {max_retries} attempts")
+    return False
  
 def main():
     """Parse arguments and run Illumio cluster manager and/or install Helm chart."""
