@@ -820,10 +820,27 @@ def main():
             print("Error: Helm is not installed or not in PATH")
             sys.exit(1)
    
-        # Ensure values file exists
-        if not os.path.isfile(os.path.join(args.chart_path, args.values_file)):
-            print(f"Error: Values file '{args.values_file}' not found in chart path '{args.chart_path}'")
+        # Ensure values file exists - check both absolute and relative paths
+        values_path = args.values_file
+        if not os.path.isabs(values_path):
+            # Try current directory first
+            if os.path.isfile(values_path):
+                values_path = os.path.abspath(values_path)
+            # Then try relative to chart path
+            elif os.path.isfile(os.path.join(args.chart_path, values_path)):
+                values_path = os.path.abspath(os.path.join(args.chart_path, values_path))
+            else:
+                print(f"Error: Values file '{args.values_file}' not found in current directory or chart path '{args.chart_path}'")
+                print(f"Please ensure values.yaml exists in one of these locations:")
+                print(f"1. Current directory: {os.getcwd()}")
+                print(f"2. Chart directory: {os.path.abspath(args.chart_path)}")
+                sys.exit(1)
+        elif not os.path.isfile(values_path):
+            print(f"Error: Values file not found at absolute path: {values_path}")
             sys.exit(1)
+        
+        # Update args.values_file with the verified path
+        args.values_file = values_path
    
     # Run Illumio cluster manager if needed
     if run_cluster_manager:
