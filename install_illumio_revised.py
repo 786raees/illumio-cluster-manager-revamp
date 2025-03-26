@@ -485,23 +485,29 @@ def retrieve_cluster_secrets(cluster_name):
         headers = {"X-Vault-Token": token}
         proxies = {"http": None, "https": None}
        
-        # Get the Vault URL for Illumio cluster secrets
-        vault_base_url = os.environ.get("VAULT_ADDR", "https://vault.example.com")  # Get base URL from env or use default
-        
-        # Construct the secret path
+        # Determine the URL for Vault API request
         if "ILLUMIO_CLUSTER_SECRETS_PATH" in os.environ:
+            # Use complete path from environment variable
             secret_path = os.environ.get("ILLUMIO_CLUSTER_SECRETS_PATH")
+            
+            # Check if the path is a full URL or just a path
+            if secret_path.startswith(('http://', 'https://')):
+                # It's already a full URL
+                url = secret_path
+                print(f"Using complete URL from environment: {url}")
+            else:
+                # It's just a path, construct full URL
+                vault_base_url = os.environ.get("VAULT_ADDR", "https://vault.example.com")
+                # Ensure path starts with /v1/ for the API
+                if not secret_path.startswith("/v1/"):
+                    secret_path = f"/v1/{secret_path.lstrip('/')}"
+                url = f"{vault_base_url.rstrip('/')}{secret_path}/{cluster_name}"
         else:
-            # Use the default path structure
+            # Use default path structure
+            vault_base_url = os.environ.get("VAULT_ADDR", "https://vault.example.com")
             secret_path = f"/v1/secret/data/illumio/{cluster_name}"
+            url = f"{vault_base_url.rstrip('/')}{secret_path}"
             print(f"ILLUMIO_CLUSTER_SECRETS_PATH not set, using default path: {secret_path}")
-        
-        # Ensure the path starts with /v1/ for the API
-        if not secret_path.startswith("/v1/"):
-            secret_path = f"/v1/{secret_path.lstrip('/')}"
-        
-        # Construct the full URL
-        url = f"{vault_base_url.rstrip('/')}{secret_path}"
            
         # Retrieve secrets from Vault
         print(f"Retrieving Illumio cluster secrets from Vault for cluster: {cluster_name}")
