@@ -486,24 +486,42 @@ def retrieve_cluster_secrets(cluster_name):
         proxies = {"http": None, "https": None}
        
         # Get the Vault URL for Illumio cluster secrets
-        if "ILLUMIO_CLUSTER_SECRETS_PATH" not in os.environ:
-            print("ILLUMIO_CLUSTER_SECRETS_PATH environment variable not set")
-            print("Trying default path...")
-            # Default path as fallback
-            url = f"secrets/illumio/{cluster_name}"
+        vault_base_url = os.environ.get("VAULT_ADDR", "https://vault.example.com")  # Get base URL from env or use default
+        
+        # Construct the secret path
+        if "ILLUMIO_CLUSTER_SECRETS_PATH" in os.environ:
+            secret_path = os.environ.get("ILLUMIO_CLUSTER_SECRETS_PATH")
         else:
-            url = os.environ.get("ILLUMIO_CLUSTER_SECRETS_PATH")
+            # Use the default path structure
+            secret_path = f"/v1/secret/data/illumio/{cluster_name}"
+            print(f"ILLUMIO_CLUSTER_SECRETS_PATH not set, using default path: {secret_path}")
+        
+        # Ensure the path starts with /v1/ for the API
+        if not secret_path.startswith("/v1/"):
+            secret_path = f"/v1/{secret_path.lstrip('/')}"
+        
+        # Construct the full URL
+        url = f"{vault_base_url.rstrip('/')}{secret_path}"
            
         # Retrieve secrets from Vault
         print(f"Retrieving Illumio cluster secrets from Vault for cluster: {cluster_name}")
+        print(f"Using Vault URL: {url}")  # Debug output
+        
         try:
-            response = ejvault.requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=10)
+            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=10)
             if response.status_code != 200:
                 print(f"Failed to retrieve cluster secrets from Vault: HTTP {response.status_code}")
+                print(f"Response: {response.text}")  # Add response text for debugging
                 return None, None, None
                
-            # Extract the secrets
-            secrets_data = response.json().get('data', {})
+            # Extract the secrets - handle both v1 and v2 KV store responses
+            response_data = response.json()
+            if "data" in response_data and "data" in response_data["data"]:
+                # KV v2 format
+                secrets_data = response_data["data"]["data"]
+            else:
+                # KV v1 format or direct data
+                secrets_data = response_data.get("data", {})
            
             # Get the specific secrets for this cluster
             container_cluster_id = secrets_data.get(f"{cluster_name}_container_cluster_id")
@@ -531,7 +549,7 @@ def retrieve_cluster_secrets(cluster_name):
             print("Successfully retrieved cluster secrets from Vault")
             return container_cluster_id, container_cluster_token, pairing_key
            
-        except Exception as ex:
+        except requests.exceptions.RequestException as ex:
             print(f"Failed to retrieve cluster secrets from Vault: {str(ex)}")
             return None, None, None
            
