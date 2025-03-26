@@ -76,6 +76,9 @@ class IllumioClusterManager:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         response = requests.put(url, timeout=15, verify=False, headers=headers, proxies=proxies, auth=auth, data=data)
         response.raise_for_status()
+        # Return None for empty responses (204 No Content)
+        if response.status_code == 204:
+            return None
         return response.json()
 
     def check_cluster_exists(self):
@@ -251,8 +254,11 @@ class IllumioClusterManager:
         # Check if profile is managed, if not set it to managed
         if not profile.get("managed", False):
             new_state = json.dumps({"managed": True, "enforcement_mode": "visibility_only"})
-            self.put_requests(profile_details_url, new_state)
-            print(f"Set profile to MANAGED and enforcement mode to VISIBILITY ONLY")
+            try:
+                self.put_requests(profile_details_url, new_state)
+                print(f"Set profile to MANAGED and enforcement mode to VISIBILITY ONLY")
+            except Exception as e:
+                print(f"Warning: Could not set profile to managed state: {str(e)}")
         
         # Get all labels
         label_url = f"{self.base_url}/labels"
@@ -285,8 +291,11 @@ class IllumioClusterManager:
         # Update profile with new labels
         if labels:
             label_update = json.dumps({"labels": labels})
-            self.put_requests(profile_details_url, label_update)
-            print(f"Default labels assigned to Container Workload Profile in cluster {self.cluster_name.upper()}")
+            try:
+                self.put_requests(profile_details_url, label_update)
+                print(f"Default labels assigned to Container Workload Profile in cluster {self.cluster_name.upper()}")
+            except Exception as e:
+                print(f"Warning: Could not assign default labels: {str(e)}")
 
     def get_cluster_labels(self):
         """Get labels for the cluster to be used in pairing profile"""
