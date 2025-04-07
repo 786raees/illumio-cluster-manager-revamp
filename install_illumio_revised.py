@@ -29,8 +29,9 @@ from bin.illumio import ejfile
 import time
 
 class IllumioClusterManager:
-    def __init__(self, cluster_name):
+    def __init__(self, cluster_name, env=None):
         self.cluster_name = cluster_name
+        self.env = env
         self.org = ejconfig.org_id
         self.container_cluster_id = ""
         self.container_workload_profile_id = ""
@@ -41,7 +42,7 @@ class IllumioClusterManager:
         self.base_url = f"https://us-scp14.illum.io/api/v2/orgs/{self.org}"
 
     def get_pce_secrets(self):
-        success, user, key = ejvault.get_pce_secrets()
+        success, user, key = ejvault.get_pce_secrets(self.env)
         if not success:
             raise Exception("Could not retrieve API credentials from Vault")
         return user, key
@@ -112,9 +113,8 @@ class IllumioClusterManager:
         # Check if vault secrets exist
         secrets_exist = False
         try:
-            # Use the retrieve_cluster_secrets function outside the class
-            # Note: We're importing it from the module level
-            container_cluster_id, container_cluster_token, pairing_key = retrieve_cluster_secrets(self.cluster_name)
+            # Use the retrieve_cluster_secrets function from ejvault
+            container_cluster_id, container_cluster_token, pairing_key = ejvault.retrieve_cluster_secrets(self.cluster_name, self.env)
             if all([container_cluster_id, container_cluster_token, pairing_key]):
                 self.container_cluster_id = container_cluster_id
                 self.container_cluster_token = container_cluster_token
@@ -374,196 +374,56 @@ class IllumioClusterManager:
         return pairing_key_details
 
     def store_illumio_install_secrets(self):
-        """Store the container cluster token, ID, and pairing key in a file and vault"""
-        # Create a JSON structure to hold the data
-        secrets_data = {
-            f"{self.cluster_name}_container_cluster_token": self.container_cluster_token,
-            f"{self.cluster_name}_container_cluster_id": self.container_cluster_id,
-            f"{self.cluster_name}_pairing_key": self.pairing_key
-        }
-        
-        # Save to file
-        secrets_file = f"/tmp/illumio_{self.cluster_name}_secrets.json"
-        success, message = ejfile.write_generic_text(json.dumps(secrets_data, indent=4), secrets_file)
-        if not success:
-            raise Exception(f"Failed to write secrets to file: {message}")
-            
-        print(f"Saved cluster secrets to {secrets_file}")
-        
-        # Call ejvault to store secrets
+        """Store the cluster secrets in vault"""
         try:
             success = ejvault.store_illumio_install_secrets(
                 self.container_cluster_token, 
                 self.container_cluster_id, 
-                self.pairing_key,
-                self.cluster_name
+                self.pairing_key, 
+                self.cluster_name,
+                self.env
             )
             if not success:
                 raise Exception("Failed to store secrets in vault")
-        except AttributeError:
-            print("Warning: ejvault.store_illumio_install_secrets function not found. Secrets were only saved to file.")
+            print(f"Successfully stored secrets in vault for {self.cluster_name}")
             return True
-            
-        print(f"Successfully stored cluster secrets in vault for {self.cluster_name}")
-        return True
+        except Exception as e:
+            print(f"Error storing secrets: {str(e)}")
+            return False
 
     def run(self):
-        """Run the Illumio cluster manager workflow"""
-        if self.check_cluster_exists():
-            print(f"Cluster {self.cluster_name} already exists.")
-            # Get profiles for the existing cluster
-            profile_url = f"{self.base_url}/container_clusters/{self.container_cluster_id}/container_workload_profiles"
-            profile_answer = self.get_requests(profile_url)
-            
-            # Apply labels
-            label_url = f"{self.base_url}/labels"
-            label_answer = self.get_requests(label_url)
-            
-            # Assign namespace and default labels to profiles
-            for item in profile_answer:
-                namespace = item.get("namespace")
-                if namespace:
-                    self.assign_namespace_labels(item, label_answer)
-                else:
-                    self.assign_default_labels(item)
+        """
+        Main method to run the cluster management process.
+        This will check if the cluster exists, create it if not,
+        and create pairing profile and pairing key.
+        """
+        exists = self.check_cluster_exists()
+        if exists:
+            print(f"Cluster {self.cluster_name} or its related resources already exist")
+            if not self.container_cluster_id:
+                print("Container cluster ID not found, creating new cluster")
+                self.create_container_cluster()
         else:
-            # Create cluster label
+            print(f"Creating new cluster resources for {self.cluster_name}")
             self.create_cluster_label()
+            self.create_container_cluster()
+            self.create_pairing_profile()
             
-            # Create container cluster
-            cluster_details = self.create_container_cluster()
+        # Create pairing key if needed
+        if not self.pairing_key:
+            self.create_pairing_key()
             
-            # Create pairing profile with all appropriate labels
-            pairing_profile_details = self.create_pairing_profile()
-            
-            # Create pairing key
-            pairing_key_details = self.create_pairing_key()
-            
-            # Store the secrets
-            self.store_illumio_install_secrets()
-            
-            # Get profiles for the cluster
-            profile_url = f"{self.base_url}/container_clusters/{self.container_cluster_id}/container_workload_profiles"
-            profile_answer = self.get_requests(profile_url)
-            
-            # Apply labels
-            label_url = f"{self.base_url}/labels"
-            label_answer = self.get_requests(label_url)
-            
-            # Assign namespace and default labels to profiles
-            for item in profile_answer:
-                namespace = item.get("namespace")
-                if namespace:
-                    self.assign_namespace_labels(item, label_answer)
-                else:
-                    self.assign_default_labels(item)
- 
-def retrieve_cluster_secrets(cluster_name):
-    """
-    Retrieve cluster secrets from Vault for the specified cluster.
-   
-    Args:
-        cluster_name (str): Name of the Kubernetes cluster
-       
-    Returns:
-        tuple: (container_cluster_id, container_cluster_token, pairing_key)
-              or (None, None, None) if retrieval fails
-    """
-    try:
-        # First get PCE credentials using ejvault's get_pce_secrets function
-        success, user, key = ejvault.get_pce_secrets()
-        if not success:
-            print("Failed to retrieve PCE credentials from Vault")
-            return None, None, None
-           
-        # Get token for Vault authentication
-        success, env, token = ejvault.get_token()
-        if not success:
-            print("Failed to authenticate with Vault")
-            return None, None, None
-           
-        # Setup headers and proxies for Vault API requests
-        headers = {"X-Vault-Token": token}
-        proxies = {"http": None, "https": None}
-       
-        # Determine the URL for Vault API request
-        if "ILLUMIO_CLUSTER_SECRETS_PATH" in os.environ:
-            # Use complete path from environment variable
-            secret_path = os.environ.get("ILLUMIO_CLUSTER_SECRETS_PATH")
-            
-            # Check if the path is a full URL or just a path
-            if secret_path.startswith(('http://', 'https://')):
-                # It's already a full URL
-                url = secret_path
-                print(f"Using complete URL from environment: {url}")
-            else:
-                # It's just a path, construct full URL
-                vault_base_url = os.environ.get("VAULT_ADDR", "https://vault.example.com")
-                # Ensure path starts with /v1/ for the API
-                if not secret_path.startswith("/v1/"):
-                    secret_path = f"/v1/{secret_path.lstrip('/')}"
-                url = f"{vault_base_url.rstrip('/')}{secret_path}/{cluster_name}"
-        else:
-            # Use default path structure
-            vault_base_url = os.environ.get("VAULT_ADDR", "https://vault.example.com")
-            secret_path = f"/v1/secret/data/illumio/{cluster_name}"
-            url = f"{vault_base_url.rstrip('/')}{secret_path}"
-            print(f"ILLUMIO_CLUSTER_SECRETS_PATH not set, using default path: {secret_path}")
-           
-        # Retrieve secrets from Vault
-        print(f"Retrieving Illumio cluster secrets from Vault for cluster: {cluster_name}")
-        print(f"Using Vault URL: {url}")  # Debug output
+        # Store secrets in vault
+        self.store_illumio_install_secrets()
         
-        try:
-            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=10)
-            if response.status_code != 200:
-                print(f"Failed to retrieve cluster secrets from Vault: HTTP {response.status_code}")
-                print(f"Response: {response.text}")  # Add response text for debugging
-                return None, None, None
-               
-            # Extract the secrets - handle both v1 and v2 KV store responses
-            response_data = response.json()
-            if "data" in response_data and "data" in response_data["data"]:
-                # KV v2 format
-                secrets_data = response_data["data"]["data"]
-            else:
-                # KV v1 format or direct data
-                secrets_data = response_data.get("data", {})
-           
-            # Get the specific secrets for this cluster
-            container_cluster_id = secrets_data.get(f"{cluster_name}_container_cluster_id")
-            container_cluster_token = secrets_data.get(f"{cluster_name}_container_cluster_token")
-            pairing_key = secrets_data.get(f"{cluster_name}_pairing_key")
-           
-            # Check if any secrets are missing
-            missing_secrets = []
-            if not container_cluster_id:
-                missing_secrets.append("container_cluster_id")
-            if not container_cluster_token:
-                missing_secrets.append("container_cluster_token")
-            if not pairing_key:
-                missing_secrets.append("pairing_key")
-               
-            if missing_secrets:
-                print(f"Missing required secrets in Vault: {', '.join(missing_secrets)}")
-                return None, None, None
-               
-            # Clean up the secrets (remove quotes and whitespace)
-            container_cluster_id = ejvault.cleanup_creds(container_cluster_id)
-            container_cluster_token = ejvault.cleanup_creds(container_cluster_token)
-            pairing_key = ejvault.cleanup_creds(pairing_key)
-           
-            print("Successfully retrieved cluster secrets from Vault")
-            return container_cluster_id, container_cluster_token, pairing_key
-           
-        except requests.exceptions.RequestException as ex:
-            print(f"Failed to retrieve cluster secrets from Vault: {str(ex)}")
-            return None, None, None
-           
-    except Exception as e:
-        print(f"Error retrieving cluster secrets: {str(e)}")
-        return None, None, None
- 
+        # Print the cluster details
+        print(f"\nCluster {self.cluster_name} details:")
+        print(f"Container Cluster ID: {self.container_cluster_id}")
+        print(f"Container Cluster Token: {self.container_cluster_token}")
+        print(f"Pairing Key: {self.pairing_key}")
+        
+        return True
+
 def validate_helm_chart(chart_path):
     """
     Validate the Helm chart to ensure it can be installed.
@@ -755,154 +615,175 @@ def cleanup_failed_installation(release_name, namespace):
 def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-system',
                               values_file='values.yaml', release_name='illumio',
                               registry='registry.access.redhat.com/ubi9',
-                              create_namespace=False, debug=False, max_retries=3):
+                              create_namespace=False, debug=False, max_retries=3, env=None):
     """
-    Install Illumio Helm chart with values from Vault.
-   
+    Install Illumio Helm chart with the specified parameters.
+    
     Args:
         cluster_name (str): Name of the Kubernetes cluster
         chart_path (str): Path to the Helm chart
         namespace (str): Kubernetes namespace
         values_file (str): Path to values.yaml file
         release_name (str): Helm release name
-        registry (str): Container registry to use
+        registry (str): Container registry
         create_namespace (bool): Create namespace if it doesn't exist
         debug (bool): Enable debug output
-        max_retries (int): Maximum number of installation attempts
-       
+        max_retries (int): Maximum number of installation retries
+        env (str): Environment (dev, test, stg, prod)
+        
     Returns:
-        bool: True if installation successful, False otherwise
+        bool: True if installation was successful, False otherwise
     """
-    # First, check if namespace exists and create it if needed
-    if create_namespace:
-        try:
-            print(f"Checking if namespace {namespace} exists...")
-            result = subprocess.run(
-                ["kubectl", "get", "namespace", namespace],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False
-            )
-           
-            if result.returncode != 0:
-                print(f"Creating namespace {namespace}...")
-                subprocess.run(
-                    ["kubectl", "create", "namespace", namespace],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                print(f"Namespace {namespace} created")
-            else:
-                print(f"Namespace {namespace} already exists")
-               
-        except Exception as e:
-            print(f"Error managing namespace: {str(e)}")
-            return False
-   
-    # Validate Helm chart
-    if not validate_helm_chart(chart_path):
-        if not debug:
-            print("Helm chart validation failed. Use --debug for more details.")
-            print("Continuing with installation anyway...")
-   
-    # Retrieve secrets from Vault
-    container_cluster_id, container_cluster_token, pairing_key = retrieve_cluster_secrets(cluster_name)
-   
+    # First, retrieve secrets from Vault using ejvault
+    container_cluster_id, container_cluster_token, pairing_key = ejvault.retrieve_cluster_secrets(cluster_name, env)
+    
     if not all([container_cluster_id, container_cluster_token, pairing_key]):
-        print("Failed to retrieve required secrets from Vault")
+        print(f"Failed to retrieve required secrets for cluster {cluster_name}")
         return False
-       
-    # Attempt installation with retries
-    attempt = 1
-    while attempt <= max_retries:
+    
+    print(f"Retrieved cluster secrets for {cluster_name} from Vault")
+    
+    # Set up namespace if needed
+    if create_namespace:
+        print(f"Creating namespace {namespace} if it doesn't exist")
         try:
-            print(f"\n=== Installation Attempt {attempt}/{max_retries} ===")
+            subprocess.run(
+                ["kubectl", "create", "namespace", namespace, "--dry-run=client", "-o", "yaml"], 
+                check=True, 
+                stdout=subprocess.PIPE
+            ).stdout.decode('utf-8')
             
-            # Build the Helm install command
-            cmd = [
-                "helm", "install", release_name,
-                chart_path,
-                "-n", namespace,
-                "-f", values_file,
-                "--set", f"cluster_id={container_cluster_id}",
-                "--set", f"cluster_token={container_cluster_token}",
-                "--set", f"cluster_code={pairing_key}",
-                "--set", f"registry={registry}"
-            ]
-           
-            # Add create-namespace flag if requested
-            if create_namespace:
-                cmd.append("--create-namespace")
-               
-            # Add debug flag if requested
-            if debug:
-                cmd.append("--debug")
-                print(f"Executing command: {' '.join(cmd)}")
-           
-            # Execute Helm install command
-            print(f"Installing Illumio Helm chart in namespace {namespace}...")
-            process = subprocess.run(
-                cmd,
+            result = subprocess.run(
+                ["kubectl", "apply", "-f", "-"],
+                input=subprocess.run(
+                    ["kubectl", "create", "namespace", namespace, "--dry-run=client", "-o", "yaml"], 
+                    check=True, 
+                    stdout=subprocess.PIPE
+                ).stdout,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            print(f"Namespace {namespace} ready")
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating namespace: {str(e)}")
+            print(f"Stderr: {e.stderr.decode('utf-8') if e.stderr else 'None'}")
+            print(f"Stdout: {e.stdout.decode('utf-8') if e.stdout else 'None'}")
+            return False
+    
+    # Check that we have access to the namespace
+    try:
+        subprocess.run(
+            ["kubectl", "auth", "can-i", "create", "pods", "-n", namespace],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        print(f"Confirmed access to namespace {namespace}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error checking namespace access: {str(e)}")
+        print(f"Stderr: {e.stderr.decode('utf-8') if e.stderr else 'None'}")
+        print(f"Stdout: {e.stdout.decode('utf-8') if e.stdout else 'None'}")
+        return False
+    
+    # Build the helm install command
+    helm_cmd = [
+        "helm", "install", release_name, chart_path,
+        "--namespace", namespace,
+        "--set", f"cluster_id={container_cluster_id}",
+        "--set", f"cluster_token={container_cluster_token}",
+        "--set", f"cluster_code={pairing_key}",
+        "--set", f"registry={registry}",
+        "-f", values_file
+    ]
+    
+    if debug:
+        helm_cmd.append("--debug")
+    
+    # Try to install the chart
+    retries = 0
+    success = False
+    while retries < max_retries and not success:
+        try:
+            if retries > 0:
+                print(f"Retry {retries}/{max_retries}...")
+                # Clean up from previous attempt
+                cleanup_failed_installation(release_name, namespace)
+                time.sleep(5)  # Wait a bit before retrying
+            
+            print(f"Installing Illumio Helm chart with command: {' '.join(helm_cmd)}")
+            result = subprocess.run(
+                helm_cmd,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
             )
-           
+            
             print("Helm install command executed successfully")
-            if debug:
-                print(process.stdout)
-           
-            # Verify installation
-            print("Verifying installation...")
-            get_release = subprocess.run(
-                ["helm", "status", release_name, "-n", namespace],
+            
+            # Wait for pods to start
+            print("Waiting for pods to start...")
+            time.sleep(30)
+            
+            # Check pod status
+            pod_status = subprocess.run(
+                ["kubectl", "get", "pods", "-n", namespace, "-l", f"app.kubernetes.io/instance={release_name}", "-o", "json"],
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True
             )
-           
-            if "STATUS: deployed" in get_release.stdout:
-                print("Illumio Helm chart deployed successfully!")
+            
+            pod_json = json.loads(pod_status.stdout)
+            pods_ready = True
+            for pod in pod_json.get("items", []):
+                pod_name = pod.get("metadata", {}).get("name", "unknown")
+                pod_phase = pod.get("status", {}).get("phase", "Unknown")
+                print(f"Pod {pod_name} is in phase {pod_phase}")
+                if pod_phase not in ["Running", "Succeeded"]:
+                    pods_ready = False
+            
+            if pods_ready:
+                print("All pods are running or completed successfully")
+                success = True
+                
+                # Following the requirement: Assign namespace and default labels to profiles after successful helm installation
+                # Get the cluster manager instance to perform label assignment
+                manager = IllumioClusterManager(cluster_name, env)
+                
+                # Get profile and label answers
+                profile_answer = manager.get_requests(f"{manager.base_url}/container_workload_profiles")
+                label_answer = manager.get_requests(f"{manager.base_url}/labels")
+                
+                # Assign namespace and default labels to profiles
+                for item in profile_answer:
+                    namespace = item.get("namespace")
+                    if namespace:
+                        manager.assign_namespace_labels(item, label_answer)
+                    else:
+                        manager.assign_default_labels(item)
+                
+                print("Assigned namespace and default labels to profiles after successful installation")
+                
                 return True
             else:
-                print("Helm install command completed but release status is not 'deployed'")
-                if debug:
-                    print(get_release.stdout)
+                print("Not all pods are ready yet, will retry...")
+                retries += 1
                 
-                # Clean up the failed installation before retrying
-                if attempt < max_retries:
-                    print(f"Deployment not successful. Cleaning up before retry...")
-                    cleanup_failed_installation(release_name, namespace)
-                
-                attempt += 1
-               
         except subprocess.CalledProcessError as e:
-            print(f"Error executing Helm command: {str(e)}")
-            print(f"Error details: {e.stderr}")
-            
-            # Clean up the failed installation before retrying
-            if attempt < max_retries:
-                print(f"Installation failed. Cleaning up before retry...")
-                cleanup_failed_installation(release_name, namespace)
-                
-            attempt += 1
-            
-        except Exception as e:
-            print(f"Unexpected error during Illumio installation: {str(e)}")
-            
-            # Clean up the failed installation before retrying
-            if attempt < max_retries:
-                print(f"Installation failed due to unexpected error. Cleaning up before retry...")
-                cleanup_failed_installation(release_name, namespace)
-                
-            attempt += 1
+            print(f"Error installing Helm chart: {str(e)}")
+            print(f"Stderr: {e.stderr if e.stderr else 'None'}")
+            print(f"Stdout: {e.stdout if e.stdout else 'None'}")
+            retries += 1
     
-    print(f"Failed to install Illumio Helm chart after {max_retries} attempts")
-    return False
- 
+    if not success:
+        print(f"Failed to install Illumio Helm chart after {max_retries} attempts")
+        return False
+    
+    return success
+
 def main():
     """Parse arguments and run Illumio cluster manager and/or install Helm chart."""
     parser = argparse.ArgumentParser(description='Manage Illumio clusters and install Helm chart')
@@ -916,7 +797,8 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     parser.add_argument('--install-only', action='store_true', help='Only install Helm chart without managing cluster')
     parser.add_argument('--manage-only', action='store_true', help='Only manage cluster without installing Helm chart')
-   
+    parser.add_argument('--env', choices=['dev', 'test', 'stg', 'prod'], help='Environment to use (dev, test, stg, prod)')
+    
     args = parser.parse_args()
     
     # Default behavior is to run both actions
@@ -968,7 +850,7 @@ def main():
     # Run Illumio cluster manager if needed
     if run_cluster_manager:
         print(f"=== Managing Illumio Cluster: {args.cluster_name} ===")
-        manager = IllumioClusterManager(args.cluster_name)
+        manager = IllumioClusterManager(args.cluster_name, args.env)
         manager.run()
    
     # Process images and update registry names if installing
@@ -987,7 +869,8 @@ def main():
             args.release_name,
             args.registry,
             args.create_namespace,
-            args.debug
+            args.debug,
+            env=args.env
         )
    
         if result:
