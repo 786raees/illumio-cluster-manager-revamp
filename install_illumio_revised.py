@@ -239,87 +239,131 @@ class IllumioClusterManager:
 
     def assign_namespace_labels(self, item, label_answer_json):
         """Assign namespace labels to container workload profiles"""
-        assigned_labels = item.get("assign_labels", [])
         profile_href = item["href"]
         self.container_workload_profile_id = profile_href.split('/', 6)[-1]
         profile_details_url = f"{self.base_url}/container_clusters/{self.container_cluster_id}/container_workload_profiles/{self.container_workload_profile_id}"
-        assigned = False
-        label_exists = False
         namespace = item["namespace"]
-
-        # First get the current profile to ensure we have the latest state
-        try:
-            current_profile = self.get_requests(profile_details_url)
-            # If the profile is already assigned labels, use those as a base
-            if "assign_labels" in current_profile:
-                assigned_labels = current_profile["assign_labels"]
-        except Exception as e:
-            print(f"Warning: Failed to get current profile state: {str(e)}")
-            # Continue with empty assigned_labels if we can't get current state
 
         print(f"Processing namespace label for namespace: {namespace}")
         
-        # Check if we already have the namespace label
-        for label in label_answer_json:
-            if label.get("key") == "namespace" and label.get("value") == namespace:
-                label_href = label["href"]
-                label_exists = True
-                print(f"Namespace label {namespace.upper()} exists.")
-                
-                # Check if this label is already assigned
-                for assigned_label in assigned_labels:
-                    if "href" in assigned_label and label_href == assigned_label.get("href"):
-                        assigned = True
-                        print(f"Namespace label already assigned for {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
+        # First get the current state of the container workload profile
+        try:
+            current_profile = self.get_requests(profile_details_url)
+            print(f"Current profile: {json.dumps(current_profile, indent=2)}")
+            
+            # Find the namespace label in available labels
+            namespace_label_href = None
+            for label in label_answer_json:
+                if label.get("key") == "namespace" and label.get("value") == namespace:
+                    namespace_label_href = label["href"]
+                    print(f"Found namespace label {namespace} with href {namespace_label_href}")
+                    break
+            
+            if not namespace_label_href:
+                # Create the namespace label if it doesn't exist
+                print(f"Creating namespace label for {namespace}")
+                namespace_label = self.create_namespace_label(namespace)
+                namespace_label_href = namespace_label["href"]
+            
+            # Construct the update
+            # Use a minimal update approach - only set enforcement_mode and managed status first
+            update_data = {
+                "managed": True,
+                "enforcement_mode": "visibility_only"
+            }
+            
+            # Apply the update in stages - first set managed status
+            print(f"Setting profile to managed with: {json.dumps(update_data)}")
+            self.put_requests(profile_details_url, json.dumps(update_data))
+            
+            # Now get the profile again after the first update
+            current_profile = self.get_requests(profile_details_url)
+            
+            # Create a new update with assign_labels
+            assign_labels = []
+            
+            # Keep any existing labels that don't conflict
+            if "assign_labels" in current_profile and isinstance(current_profile["assign_labels"], list):
+                # Check if the namespace label is already assigned
+                namespace_already_assigned = False
+                for label in current_profile["assign_labels"]:
+                    if label.get("href") == namespace_label_href:
+                        namespace_already_assigned = True
+                        print(f"Namespace label already assigned for {namespace}")
                         break
                 
-                if not assigned:
-                    try:
-                        # Add the new label to the existing ones
-                        new_assigned_labels = assigned_labels.copy()
-                        new_assigned_labels.append({"href": label_href})
-                        
-                        # Format the request body properly
-                        label_update = json.dumps({"assign_labels": new_assigned_labels})
-                        print(f"Updating profile with assign_labels: {label_update}")
-                        
-                        # Make the PUT request
-                        self.put_requests(profile_details_url, label_update)
-                        print(f"Namespace label assigned to {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
-                    except Exception as e:
-                        print(f"Error assigning namespace label: {str(e)}")
-                        print(f"Request URL: {profile_details_url}")
-                        print(f"Request body: {label_update}")
-                break
-        
-        if not label_exists:
-            self.create_assign_namespace_label(namespace, profile_details_url)
+                # If not already assigned, add it to existing labels
+                if not namespace_already_assigned:
+                    assign_labels = current_profile["assign_labels"].copy()
+                    assign_labels.append({"href": namespace_label_href})
+                else:
+                    # Already assigned, nothing to do
+                    print(f"Namespace label for {namespace} already assigned, no update needed")
+                    return
+            else:
+                # No existing labels, just add the namespace label
+                assign_labels = [{"href": namespace_label_href}]
+            
+            # Create a new update with just assign_labels
+            update_data = {"assign_labels": assign_labels}
+            
+            # Apply the second update with assign_labels
+            print(f"Assigning namespace label with: {json.dumps(update_data)}")
+            result = self.put_requests(profile_details_url, json.dumps(update_data))
+            print(f"Label assignment result: {result}")
+            print(f"Successfully assigned namespace label {namespace} to profile")
+            
+        except Exception as e:
+            print(f"Error assigning namespace label: {str(e)}")
+            print(f"Profile URL: {profile_details_url}")
+            print(f"Will continue processing other profiles")
+    
+    def create_namespace_label(self, namespace):
+        """Create a namespace label"""
+        label_url = f"{self.base_url}/labels"
+        new_label = json.dumps({"key": "namespace", "value": namespace})
+        print(f"Creating new namespace label with data: {new_label}")
+        try:
+            new_label_response = self.post_requests(label_url, new_label)
+            print(f"Created new namespace label: {json.dumps(new_label_response, indent=2)}")
+            return new_label_response
+        except Exception as e:
+            print(f"Error creating namespace label: {str(e)}")
+            raise
 
     def create_assign_namespace_label(self, namespace, profile_details_url):
         """Create and assign a namespace label to a container workload profile"""
         try:
+            # Create the namespace label
+            new_label_response = self.create_namespace_label(namespace)
+            new_label_href = new_label_response["href"]
+            
             # First get the current profile to ensure we have the latest state
             current_profile = self.get_requests(profile_details_url)
-            assigned_labels = current_profile.get("assign_labels", [])
             
-            # Create the namespace label
-            label_url = f"{self.base_url}/labels"
-            new_label = json.dumps({"key": "namespace", "value": namespace})
-            print(f"Creating new namespace label with data: {new_label}")
-            new_label_response = self.post_requests(label_url, new_label)
-            new_label_href = new_label_response["href"]
-            print(f"Created new namespace label with href: {new_label_href}")
+            # Set the profile to managed first
+            update_data = {
+                "managed": True,
+                "enforcement_mode": "visibility_only"
+            }
+            print(f"Setting profile to managed with: {json.dumps(update_data)}")
+            self.put_requests(profile_details_url, json.dumps(update_data))
+            
+            # Now get the profile again
+            current_profile = self.get_requests(profile_details_url)
+            assigned_labels = current_profile.get("assign_labels", [])
             
             # Add the new label to any existing assigned labels
             new_assigned_labels = assigned_labels.copy()
             new_assigned_labels.append({"href": new_label_href})
             
-            # Format the request properly
+            # Format the request properly - just assign_labels
             label_update = json.dumps({"assign_labels": new_assigned_labels})
             print(f"Updating profile with assign_labels: {label_update}")
             
             # Make the PUT request
-            self.put_requests(profile_details_url, label_update)
+            result = self.put_requests(profile_details_url, label_update)
+            print(f"Label assignment result: {result}")
             print(f"Namespace label created and assigned to {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
         except Exception as e:
             print(f"Error creating and assigning namespace label: {str(e)}")
@@ -332,54 +376,69 @@ class IllumioClusterManager:
         self.container_workload_profile_id = profile_href.split('/', 6)[-1]
         profile_details_url = f"{self.base_url}/container_clusters/{self.container_cluster_id}/container_workload_profiles/{self.container_workload_profile_id}"
         
-        # Get current profile state
-        profile = self.get_requests(profile_details_url)
+        print(f"Processing default labels for profile: {self.container_workload_profile_id}")
         
-        # Check if profile is managed, if not set it to managed
-        if not profile.get("managed", False):
-            new_state = json.dumps({"managed": True, "enforcement_mode": "visibility_only"})
-            try:
-                self.put_requests(profile_details_url, new_state)
-                print(f"Set profile to MANAGED and enforcement mode to VISIBILITY ONLY")
-            except Exception as e:
-                print(f"Warning: Could not set profile to managed state: {str(e)}")
-        
-        # Get all labels
-        label_url = f"{self.base_url}/labels"
-        label_answer = self.get_requests(label_url)
-        
-        # Prepare labels to assign
-        labels = []
-        label_list = ["data", "kubeapi", "metadataapi", "riskscore"]
-        
-        # Process each label type
-        for list_label in label_list:
-            if list_label == "data" or list_label == "riskscore":
-                # These labels can have multiple values
-                restrictions = []
-                for pce_label in label_answer:
-                    if pce_label.get("key") == list_label:
-                        restrictions.append({"href": pce_label["href"]})
+        try:
+            # Get current profile state
+            profile = self.get_requests(profile_details_url)
+            print(f"Current profile state: {json.dumps(profile, indent=2)}")
+            
+            # First step: Set the profile to managed with visibility_only enforcement
+            if not profile.get("managed", False) or profile.get("enforcement_mode") != "visibility_only":
+                update_data = {
+                    "managed": True,
+                    "enforcement_mode": "visibility_only"
+                }
+                print(f"Setting profile to MANAGED and enforcement mode to VISIBILITY ONLY")
+                self.put_requests(profile_details_url, json.dumps(update_data))
+                print("Profile set to managed state successfully")
                 
-                if restrictions:
-                    labels.append({"key": list_label, "restriction": restrictions})
+                # Get updated profile
+                profile = self.get_requests(profile_details_url)
             else:
-                # These labels have a single value
-                for pce_label in label_answer:
-                    if pce_label.get("key") == list_label:
-                        labels.append({
-                            "key": list_label, 
-                            "restriction": [{"href": pce_label["href"]}]
-                        })
-        
-        # Update profile with new labels
-        if labels:
-            label_update = json.dumps({"labels": labels})
-            try:
-                self.put_requests(profile_details_url, label_update)
+                print("Profile already in managed state with visibility_only enforcement")
+            
+            # Second step: Get all available labels
+            label_url = f"{self.base_url}/labels"
+            label_answer = self.get_requests(label_url)
+            
+            # Prepare default labels to assign
+            labels = []
+            label_list = ["data", "kubeapi", "metadataapi", "riskscore"]
+            
+            # Process each label type
+            for list_label in label_list:
+                if list_label == "data" or list_label == "riskscore":
+                    # These labels can have multiple values
+                    restrictions = []
+                    for pce_label in label_answer:
+                        if pce_label.get("key") == list_label:
+                            restrictions.append({"href": pce_label["href"]})
+                    
+                    if restrictions:
+                        labels.append({"key": list_label, "restriction": restrictions})
+                else:
+                    # These labels have a single value
+                    for pce_label in label_answer:
+                        if pce_label.get("key") == list_label:
+                            labels.append({
+                                "key": list_label, 
+                                "restriction": [{"href": pce_label["href"]}]
+                            })
+            
+            # Update profile with the label restrictions
+            if labels:
+                label_update = json.dumps({"labels": labels})
+                print(f"Updating profile with default label restrictions: {label_update}")
+                result = self.put_requests(profile_details_url, json.dumps({"labels": labels}))
                 print(f"Default labels assigned to Container Workload Profile in cluster {self.cluster_name.upper()}")
-            except Exception as e:
-                print(f"Warning: Could not assign default labels: {str(e)}")
+                print(f"Label assignment result: {result}")
+            else:
+                print("No default labels found to assign")
+                
+        except Exception as e:
+            print(f"Warning: Could not assign default labels: {str(e)}")
+            print(f"Profile URL: {profile_details_url}")
 
     def get_cluster_labels(self):
         """Get labels for the cluster to be used in pairing profile"""
