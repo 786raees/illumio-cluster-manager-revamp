@@ -232,7 +232,7 @@ class IllumioClusterManager:
                 label_hrefs.append({"href": label["href"]})
             elif label.get("key") == "app" and label.get("value") == cluster_type:
                 label_hrefs.append({"href": label["href"]})
-            elif label.get("key") == "role" and label.get("value") in ["Container", "Cluster Node"]:
+            elif label.get("key") == "role" and label.get("value") in ["Cluster Node"]:
                 label_hrefs.append({"href": label["href"]})
         
         return label_hrefs
@@ -489,7 +489,7 @@ class IllumioClusterManager:
                     loc_label = {"href": label["href"]}
                 elif label.get("key") == "app" and label.get("value") == cluster_type:
                     app_label = {"href": label["href"]}
-                elif label.get("key") == "role" and label.get("value") in ["Container"]:
+                elif label.get("key") == "role" and label.get("value") in ["Cluster Node"]:
                     role_label = {"href": label["href"]}
             
             # Compile the assign_labels with the found labels
@@ -639,6 +639,22 @@ class IllumioClusterManager:
             self.create_cluster_label()
             self.create_container_cluster()
             self.create_pairing_profile()
+            
+            # Apply default labels to container workload profiles for new clusters
+            try:
+                profile_url = f"{self.base_url}/container_clusters/{self.container_cluster_id}/container_workload_profiles"
+                print(f"Retrieving container workload profiles to apply default labels")
+                profile_answer = self.get_requests(profile_url)
+                
+                # Apply default labels to each profile
+                for item in profile_answer:
+                    namespace = item.get("namespace")
+                    # If no namespace, it's likely the default profile
+                    if not namespace:
+                        print("Applying default labels to default workload profile")
+                        self.assign_default_labels(item)
+            except Exception as e:
+                print(f"Warning: Could not assign default labels: {str(e)}")
             
         # Create pairing key if needed
         if not self.pairing_key:
@@ -843,7 +859,7 @@ def cleanup_failed_installation(release_name, namespace):
         print(f"Error during cleanup: {str(e)}")
         return False
 
-def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-system',
+def install_illumio_helm_chart(cluster_name, chart_path='./Illumio/', namespace='illumio-system',
                               values_file='values.yaml', release_name='illumio',
                               registry='registry.access.redhat.com/ubi9',
                               create_namespace=False, debug=False, max_retries=3, env=None):
@@ -920,7 +936,7 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
     
     # Build the helm install command
     helm_cmd = [
-        "helm", "install", release_name, chart_path,
+        "helm", "upgrade", "--install", release_name, chart_path,
         "--namespace", namespace,
         "--set", f"cluster_id={container_cluster_id}",
         "--set", f"cluster_token={container_cluster_token}",
@@ -1065,16 +1081,16 @@ def main():
     """Parse arguments and run Illumio cluster manager and/or install Helm chart."""
     parser = argparse.ArgumentParser(description='Manage Illumio clusters and install Helm chart')
     parser.add_argument('--cluster-name', '--cluster', '-c', required=True, help='Name of the Kubernetes cluster')
-    parser.add_argument('--chart-path', default='.', help='Path to the Helm chart directory')
+    parser.add_argument('--chart-path', default='./Illumio/', help='Path to the Helm chart directory')
     parser.add_argument('--namespace', default='illumio-system', help='Kubernetes namespace')
     parser.add_argument('--values-file', default='values.yaml', help='Path to values.yaml file')
     parser.add_argument('--release-name', default='illumio', help='Helm release name')
-    parser.add_argument('--registry', default='registry.access.redhat.com/ubi9', help='Container registry')
+    parser.add_argument('--registry', required=True, help='Container registry')
     parser.add_argument('--create-namespace', action='store_true', help='Create namespace if it does not exist')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     parser.add_argument('--install-only', action='store_true', help='Only install Helm chart without managing cluster')
     parser.add_argument('--manage-only', action='store_true', help='Only manage cluster without installing Helm chart')
-    parser.add_argument('--env', choices=['dev', 'test', 'stg', 'prod'], help='Environment to use (dev, test, stg, prod)')
+    parser.add_argument('--env', required=True, choices=['dev', 'test', 'stg', 'prod'], help='Environment to use (dev, test, stg, prod)')
     
     args = parser.parse_args()
     
