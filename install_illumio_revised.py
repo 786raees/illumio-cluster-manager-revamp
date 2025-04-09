@@ -921,8 +921,7 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
                         namespace = item.get("namespace")
                         if namespace:
                             manager.assign_namespace_labels(item, label_answer)
-                        else:
-                            manager.assign_default_labels(item)
+                        manager.assign_default_labels(item)
                     
                     print("Assigned namespace and default labels to profiles after successful installation")
                 except Exception as e:
