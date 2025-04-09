@@ -91,41 +91,76 @@ class IllumioClusterManager:
         # Check if cluster exists in container_clusters
         cluster_exists = False
         cluster_url = f"{self.base_url}/container_clusters"
-        clusters = self.get_requests(cluster_url)
-        for cluster in clusters:
-            if cluster.get("name") == self.cluster_name:
-                self.container_cluster_id = cluster["href"].split('/', 4)[-1]
-                cluster_exists = True
-                print(f"Found existing cluster {self.cluster_name} in PCE container clusters")
-                break
+        print(f"Checking if cluster {self.cluster_name} exists in PCE...")
+        try:
+            clusters = self.get_requests(cluster_url)
+            for cluster in clusters:
+                if cluster.get("name") == self.cluster_name:
+                    self.container_cluster_id = cluster["href"].split('/', 4)[-1]
+                    cluster_exists = True
+                    print(f"Found existing cluster {self.cluster_name} in PCE container clusters")
+                    print(f"Container cluster ID: {self.container_cluster_id}")
+                    
+                    # Also get the token if available
+                    self.container_cluster_token = cluster.get("container_cluster_token", "")
+                    if self.container_cluster_token:
+                        print("Retrieved container cluster token from PCE")
+                    break
+        except Exception as e:
+            print(f"Error checking if cluster exists in PCE: {str(e)}")
         
         # Check if pairing profile exists
         pairing_exists = False
         pairing_url = f"{self.base_url}/pairing_profiles"
-        pairing_profiles = self.get_requests(pairing_url)
-        for profile in pairing_profiles:
-            if profile.get("name") == self.cluster_name:
-                self.pairing_profile_id = profile["href"].split('/', 4)[-1]
-                pairing_exists = True
-                print(f"Found existing pairing profile for {self.cluster_name}")
-                break
+        try:
+            pairing_profiles = self.get_requests(pairing_url)
+            for profile in pairing_profiles:
+                if profile.get("name") == self.cluster_name:
+                    self.pairing_profile_id = profile["href"].split('/', 4)[-1]
+                    pairing_exists = True
+                    print(f"Found existing pairing profile for {self.cluster_name}")
+                    
+                    # Try to get a pairing key for this profile if we don't have one
+                    if not self.pairing_key and self.pairing_profile_id:
+                        try:
+                            self.create_pairing_key()
+                        except Exception as e:
+                            print(f"Could not create pairing key: {str(e)}")
+                    break
+        except Exception as e:
+            print(f"Error checking for pairing profile: {str(e)}")
         
-        # Check if vault secrets exist
+        # Check if vault secrets exist - prioritize these values if found
         secrets_exist = False
         try:
             # Use the retrieve_cluster_secrets function from ejvault
             container_cluster_id, container_cluster_token, pairing_key = ejvault.retrieve_cluster_secrets(self.cluster_name, self.env)
-            if all([container_cluster_id, container_cluster_token, pairing_key]):
+            if container_cluster_id:
                 self.container_cluster_id = container_cluster_id
+                secrets_exist = True
+                print(f"Found existing container_cluster_id in vault for {self.cluster_name}: {container_cluster_id}")
+            
+            if container_cluster_token:
                 self.container_cluster_token = container_cluster_token
+                secrets_exist = True
+                print(f"Found existing container_cluster_token in vault for {self.cluster_name}")
+            
+            if pairing_key:
                 self.pairing_key = pairing_key
                 secrets_exist = True
-                print(f"Found existing secrets in vault for {self.cluster_name}")
+                print(f"Found existing pairing_key in vault for {self.cluster_name}")
         except Exception as e:
             print(f"Error checking for vault secrets: {str(e)}")
         
         # Return True if any of these exist
-        return cluster_exists or pairing_exists or secrets_exist
+        exists = cluster_exists or pairing_exists or secrets_exist
+        
+        # Ensure integrity of data if cluster exists
+        if exists and not self.container_cluster_id:
+            print("WARNING: Cluster exists but container_cluster_id is not set. Will attempt to create a new cluster.")
+            exists = False
+            
+        return exists
 
     def create_cluster_label(self):
         label_url = f"{self.base_url}/labels"
@@ -753,19 +788,39 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
                 # Get the cluster manager instance to perform label assignment
                 manager = IllumioClusterManager(cluster_name, env)
                 
+                # Ensure the cluster manager has the correct container_cluster_id
+                # This fixes the issue when the cluster already exists
+                if not manager.container_cluster_id and container_cluster_id:
+                    print(f"Setting container_cluster_id to {container_cluster_id}")
+                    manager.container_cluster_id = container_cluster_id
+                
+                # Verify we have a valid container_cluster_id before proceeding
+                if not manager.container_cluster_id:
+                    print("Error: container_cluster_id is empty. Cannot assign labels.")
+                    print("The cluster exists but couldn't be properly identified.")
+                    return True  # Return True since the installation itself was successful
+
+                print(f"Using container_cluster_id: {manager.container_cluster_id}")
+                
                 # Get profile and label answers
-                profile_answer = manager.get_requests(f"{manager.base_url}/container_clusters/{manager.container_cluster_id}/container_workload_profiles")
-                label_answer = manager.get_requests(f"{manager.base_url}/labels")
-                
-                # Assign namespace and default labels to profiles
-                for item in profile_answer:
-                    namespace = item.get("namespace")
-                    if namespace:
-                        manager.assign_namespace_labels(item, label_answer)
-                    else:
-                        manager.assign_default_labels(item)
-                
-                print("Assigned namespace and default labels to profiles after successful installation")
+                try:
+                    profile_url = f"{manager.base_url}/container_clusters/{manager.container_cluster_id}/container_workload_profiles"
+                    print(f"Retrieving container workload profiles using URL: {profile_url}")
+                    profile_answer = manager.get_requests(profile_url)
+                    label_answer = manager.get_requests(f"{manager.base_url}/labels")
+                    
+                    # Assign namespace and default labels to profiles
+                    for item in profile_answer:
+                        namespace = item.get("namespace")
+                        if namespace:
+                            manager.assign_namespace_labels(item, label_answer)
+                        else:
+                            manager.assign_default_labels(item)
+                    
+                    print("Assigned namespace and default labels to profiles after successful installation")
+                except Exception as e:
+                    print(f"Warning: Failed to assign labels: {str(e)}")
+                    print("Continuing with installation as successful, but labels were not assigned")
                 
                 return True
             else:
