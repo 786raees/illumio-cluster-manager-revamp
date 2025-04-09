@@ -247,36 +247,84 @@ class IllumioClusterManager:
         label_exists = False
         namespace = item["namespace"]
 
+        # First get the current profile to ensure we have the latest state
+        try:
+            current_profile = self.get_requests(profile_details_url)
+            # If the profile is already assigned labels, use those as a base
+            if "assign_labels" in current_profile:
+                assigned_labels = current_profile["assign_labels"]
+        except Exception as e:
+            print(f"Warning: Failed to get current profile state: {str(e)}")
+            # Continue with empty assigned_labels if we can't get current state
+
+        print(f"Processing namespace label for namespace: {namespace}")
+        
+        # Check if we already have the namespace label
         for label in label_answer_json:
-            if label["value"] == namespace:
+            if label.get("key") == "namespace" and label.get("value") == namespace:
                 label_href = label["href"]
                 label_exists = True
                 print(f"Namespace label {namespace.upper()} exists.")
+                
+                # Check if this label is already assigned
                 for assigned_label in assigned_labels:
-                    if label_href == assigned_label.get("href"):
+                    if "href" in assigned_label and label_href == assigned_label.get("href"):
                         assigned = True
                         print(f"Namespace label already assigned for {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
                         break
+                
                 if not assigned:
-                    namespace_label = json.dumps({"href": label_href})
-                    assigned_labels.append(json.loads(namespace_label))
-                    label_update = json.dumps({"assign_labels": assigned_labels})
-                    self.put_requests(profile_details_url, label_update)
-                    print(f"Namespace label assigned to {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
+                    try:
+                        # Add the new label to the existing ones
+                        new_assigned_labels = assigned_labels.copy()
+                        new_assigned_labels.append({"href": label_href})
+                        
+                        # Format the request body properly
+                        label_update = json.dumps({"assign_labels": new_assigned_labels})
+                        print(f"Updating profile with assign_labels: {label_update}")
+                        
+                        # Make the PUT request
+                        self.put_requests(profile_details_url, label_update)
+                        print(f"Namespace label assigned to {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
+                    except Exception as e:
+                        print(f"Error assigning namespace label: {str(e)}")
+                        print(f"Request URL: {profile_details_url}")
+                        print(f"Request body: {label_update}")
+                break
+        
         if not label_exists:
             self.create_assign_namespace_label(namespace, profile_details_url)
 
     def create_assign_namespace_label(self, namespace, profile_details_url):
         """Create and assign a namespace label to a container workload profile"""
-        label_url = f"{self.base_url}/labels"
-        new_label = json.dumps({"key": "namespace", "value": namespace})
-        new_label_response = self.post_requests(label_url, new_label)
-        new_label_href = new_label_response["href"]
-        namespace_label = json.dumps({"href": new_label_href})
-        assigned_labels = [json.loads(namespace_label)]
-        label_update = json.dumps({"assign_labels": assigned_labels})
-        self.put_requests(profile_details_url, label_update)
-        print(f"Namespace label created and assigned to {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
+        try:
+            # First get the current profile to ensure we have the latest state
+            current_profile = self.get_requests(profile_details_url)
+            assigned_labels = current_profile.get("assign_labels", [])
+            
+            # Create the namespace label
+            label_url = f"{self.base_url}/labels"
+            new_label = json.dumps({"key": "namespace", "value": namespace})
+            print(f"Creating new namespace label with data: {new_label}")
+            new_label_response = self.post_requests(label_url, new_label)
+            new_label_href = new_label_response["href"]
+            print(f"Created new namespace label with href: {new_label_href}")
+            
+            # Add the new label to any existing assigned labels
+            new_assigned_labels = assigned_labels.copy()
+            new_assigned_labels.append({"href": new_label_href})
+            
+            # Format the request properly
+            label_update = json.dumps({"assign_labels": new_assigned_labels})
+            print(f"Updating profile with assign_labels: {label_update}")
+            
+            # Make the PUT request
+            self.put_requests(profile_details_url, label_update)
+            print(f"Namespace label created and assigned to {namespace.upper()} profile in cluster {self.cluster_name.upper()}")
+        except Exception as e:
+            print(f"Error creating and assigning namespace label: {str(e)}")
+            print(f"Profile URL: {profile_details_url}")
+            print(f"Namespace: {namespace}")
 
     def assign_default_labels(self, item):
         """Assign default labels to container workload profiles"""
