@@ -754,7 +754,7 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
                 manager = IllumioClusterManager(cluster_name, env)
                 
                 # Get profile and label answers
-                profile_answer = manager.get_requests(f"{manager.base_url}/container_workload_profiles")
+                profile_answer = manager.get_requests(f"{manager.base_url}/container_clusters/{manager.container_cluster_id}/container_workload_profiles")
                 label_answer = manager.get_requests(f"{manager.base_url}/labels")
                 
                 # Assign namespace and default labels to profiles
