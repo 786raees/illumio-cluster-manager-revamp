@@ -152,8 +152,8 @@ class IllumioClusterManager:
         except Exception as e:
             print(f"Error checking for vault secrets: {str(e)}")
         
-        # Return True if any of these exist
-        exists = cluster_exists or pairing_exists or secrets_exist
+        # Return True only if all three exist: cluster in PCE, pairing profile, and vault secrets
+        exists = cluster_exists and pairing_exists and secrets_exist
         
         # Ensure integrity of data if cluster exists
         if exists and not self.container_cluster_id:
@@ -435,6 +435,95 @@ class IllumioClusterManager:
                 print(f"Label assignment result: {result}")
             else:
                 print("No default labels found to assign")
+            
+            # Third step: Add container annotation labels
+            # Get the cluster labels for the cluster
+            cluster_labels = []
+            for label in label_answer:
+                if label.get("key") == "cluster" and label.get("value") == self.cluster_name:
+                    cluster_labels.append({"href": label["href"]})
+            
+            # Get environment label based on cluster name convention
+            target_env = self.cluster_name[2:5]
+            env_value = None
+            if target_env == "dev":
+                env_value = "Development"
+            elif target_env == "cln" or target_env == "uat":
+                env_value = "Clone"
+            elif target_env == "prd":
+                env_value = "Production"
+            else:
+                target_env = self.cluster_name[5:6]
+                if target_env == 'd':
+                    env_value = "Development"
+                elif target_env == 'q' or target_env == 'a' or target_env == 'c':
+                    env_value = "Clone"
+                elif target_env == 'p':
+                    env_value = "Production"
+            
+            # Get location label based on cluster name convention
+            target_location = self.cluster_name[6:7]
+            location_value = None
+            if target_location == 's':
+                location_value = "Azure South Central US"
+            elif target_location == 'n':
+                location_value = "Azure North Central US"
+            else:
+                location_value = "Azure Central US"
+            
+            # Get cluster type label
+            cluster_type = "general"
+            if "gtw" in self.cluster_name:
+                cluster_type = "mulesoft"
+            
+            # Find the environment, location, and app labels
+            env_label = None
+            loc_label = None
+            app_label = None
+            role_label = None
+            
+            for label in label_answer:
+                if env_value and label.get("key") == "env" and label.get("value") == env_value:
+                    env_label = {"href": label["href"]}
+                elif location_value and label.get("key") == "loc" and label.get("value") == location_value:
+                    loc_label = {"href": label["href"]}
+                elif label.get("key") == "app" and label.get("value") == cluster_type:
+                    app_label = {"href": label["href"]}
+                elif label.get("key") == "role" and label.get("value") in ["Container"]:
+                    role_label = {"href": label["href"]}
+            
+            # Compile the assign_labels with the found labels
+            assign_labels = []
+            if env_label:
+                assign_labels.append(env_label)
+            if loc_label:
+                assign_labels.append(loc_label)
+            if app_label:
+                assign_labels.append(app_label)
+            if role_label:
+                assign_labels.append(role_label)
+            if cluster_labels:
+                assign_labels.extend(cluster_labels)
+            
+            # If we have labels to assign, update the profile
+            if assign_labels:
+                # Get the current assign_labels to avoid overwriting
+                current_profile = self.get_requests(profile_details_url)
+                current_assign_labels = current_profile.get("assign_labels", [])
+                
+                # Merge existing labels with new ones, avoiding duplicates
+                for label in assign_labels:
+                    if label not in current_assign_labels:
+                        current_assign_labels.append(label)
+                
+                # Update the profile with the merged labels
+                assign_update = json.dumps({"assign_labels": current_assign_labels})
+                print(f"Updating profile with assign_labels: {assign_update}")
+                result = self.put_requests(profile_details_url, assign_update)
+                print(f"Container annotation labels assigned to Container Workload Profile")
+                print(f"Label assignment result: {result}")
+            else:
+                print("No container annotation labels found to assign")
                 
         except Exception as e:
             print(f"Warning: Could not assign default labels: {str(e)}")
@@ -884,14 +973,42 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
                 pod_name = pod.get("metadata", {}).get("name", "unknown")
                 pod_phase = pod.get("status", {}).get("phase", "Unknown")
                 print(f"Pod {pod_name} is in phase {pod_phase}")
-                if pod_phase not in ["Running", "Succeeded"]:
-                    pods_ready = False
-            
+                
+                # Check for both phase and container statuses
+                if pod_phase != "Running":
+                    # Only consider Succeeded as an acceptable non-Running state
+                    if pod_phase != "Succeeded":
+                        print(f"Pod {pod_name} is not running (status: {pod_phase})")
+                        pods_ready = False
+                
+                # Check container statuses if available
+                if "status" in pod and "containerStatuses" in pod["status"]:
+                    for container in pod["status"]["containerStatuses"]:
+                        container_name = container.get("name", "unknown")
+                        ready = container.get("ready", False)
+                        if not ready:
+                            print(f"Container {container_name} in pod {pod_name} is not ready")
+                            pods_ready = False
+                        
+                        # Check for container restarts or crash loops
+                        restart_count = container.get("restartCount", 0)
+                        state = container.get("state", {})
+                        if restart_count > 3:
+                            print(f"Container {container_name} has restarted {restart_count} times - possible crash loop")
+                            pods_ready = False
+                        
+                        # Check if container is in waiting state with error
+                        if "waiting" in state and "reason" in state["waiting"]:
+                            reason = state["waiting"]["reason"]
+                            if reason in ["CrashLoopBackOff", "Error", "ImagePullBackOff", "CreateContainerError"]:
+                                print(f"Container {container_name} is in error state: {reason}")
+                                pods_ready = False
+                                
             if pods_ready:
                 print("All pods are running or completed successfully")
                 success = True
                 
-                # Following the requirement: Assign namespace and default labels to profiles after successful helm installation
+                # Following the requirement: Assign namespace labels to profiles after successful helm installation
                 # Get the cluster manager instance to perform label assignment
                 manager = IllumioClusterManager(cluster_name, env)
                 
@@ -916,14 +1033,13 @@ def install_illumio_helm_chart(cluster_name, chart_path='.', namespace='illumio-
                     profile_answer = manager.get_requests(profile_url)
                     label_answer = manager.get_requests(f"{manager.base_url}/labels")
                     
-                    # Assign namespace and default labels to profiles
+                    # Only assign namespace labels after successful helm install
                     for item in profile_answer:
                         namespace = item.get("namespace")
                         if namespace:
                             manager.assign_namespace_labels(item, label_answer)
-                        manager.assign_default_labels(item)
                     
-                    print("Assigned namespace and default labels to profiles after successful installation")
+                    print("Assigned namespace labels to profiles after successful installation")
                 except Exception as e:
                     print(f"Warning: Failed to assign labels: {str(e)}")
                     print("Continuing with installation as successful, but labels were not assigned")
